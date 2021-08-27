@@ -7,6 +7,7 @@ import logging
 import argparse
 import itertools
 import torch
+import torch.nn as nn
 
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
@@ -87,6 +88,7 @@ parser.add_argument('--num-workers', '--workers', default=2, type=int,
                     help='Number of workers used in dataloading')
 parser.add_argument('--validation-epochs', default=1, type=int,
                     help='the number epochs between running validation')
+parser.add_argument('--gpu_devices', '--gpu-devices', type=int, nargs='+', default=None, help="Number of GPU devices")
 parser.add_argument('--debug-steps', default=10, type=int,
                     help='Set the debug log output frequency.')
 parser.add_argument('--use-cuda', default=True, type=str2bool,
@@ -98,12 +100,21 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format='%(asctime)s - %(message)s', datefmt="%Y-%m-%d %H:%M:%S")
                     
 args = parser.parse_args()
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() and args.use_cuda else "cpu")
+
+if args.gpu_devices is not None:
+    gpu_devices = ','.join([str(id) for id in args.gpu_devices])
+    if len(gpu_devices) > 1:
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
+        DEVICE = torch.device("cuda" if torch.cuda.is_available() and args.use_cuda else "cpu")
+        logging.info("Using Multiple GPUs")
+    else:
+        DEVICE = torch.device("cuda:0" if torch.cuda.is_available() and args.use_cuda else "cpu")
+else:
+    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() and args.use_cuda else "cpu")
 
 if args.use_cuda and torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
     logging.info("Using CUDA...")
-
 
 def train(loader, net, criterion, optimizer, device, debug_steps=100, epoch=-1):
     net.train(True)
@@ -310,8 +321,15 @@ if __name__ == '__main__':
     logging.info(f'Took {timer.end("Load Model"):.2f} seconds to load the model.')
 
     # move the model to GPU
-    net.to(DEVICE)
-
+    if args.gpu_devices is not None:
+        if len(gpu_devices) > 1:
+            net = nn.DataParallel(net)
+            net = net.to(DEVICE)
+        else:
+            net.to(DEVICE)
+    else:
+        net.to(DEVICE)
+       
     # define loss function and optimizer
     criterion = MultiboxLoss(config.priors, iou_threshold=0.5, neg_pos_ratio=3,
                              center_variance=0.1, size_variance=0.2, device=DEVICE)
@@ -351,7 +369,14 @@ if __name__ == '__main__':
                 f"Validation Classification Loss: {val_classification_loss:.4f}"
             )
             model_path = os.path.join(args.checkpoint_folder, f"{args.net}-Epoch-{epoch}-Loss-{val_loss}.pth")
-            net.save(model_path)
+            
+            if args.gpu_devices is not None:
+                if len(gpu_devices) > 1:
+                    torch.save(net.module.state_dict(), model_path)
+                else:
+                    net.save(model_path)
+            else:
+                net.save(model_path)
             logging.info(f"Saved model {model_path}")
-
     logging.info("Task done, exiting program.")
+
